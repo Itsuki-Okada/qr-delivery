@@ -10,7 +10,12 @@ export interface KeyValueStorage {
 
 export const DEMO_ACCOUNTS: readonly { email: string; password: string; displayName: string }[] = [];
 
-export function createDemoBackend(opts: unknown): Backend & { reset(): void } {
+export interface DemoExtras {
+  reset(): void;
+  adoptForeignToken(token: string): Promise<boolean>;
+}
+
+export function createDemoBackend(opts: unknown): Backend & DemoExtras {
   void opts;
   throw new Error("デモモードはこのビルドでは無効です");
 }

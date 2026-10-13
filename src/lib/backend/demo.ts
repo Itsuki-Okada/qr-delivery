@@ -155,12 +155,22 @@ function paginate<T>(rows: T[], page = 1) {
   return rows.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE);
 }
 
+export interface DemoExtras {
+  reset(): void;
+  /**
+   * 別の端末（ブラウザ）で発行されたデモ用 QR を、この端末で未使用の QR として受け入れる。
+   * デモのデータは端末ごとに独立しているため、スマホで顧客画面を体験するために使う。
+   * 本番（Supabase）には存在しない機能。
+   */
+  adoptForeignToken(token: string): Promise<boolean>;
+}
+
 export function createDemoBackend(opts: {
   data: KeyValueStorage;
   session: KeyValueStorage;
   /** テスト用: 見本データを入れない */
   emptySeed?: boolean;
-}): Backend & { reset(): void } {
+}): Backend & DemoExtras {
   function load(): DemoState {
     const raw = opts.data.getItem(DATA_KEY);
     if (raw) {
@@ -405,6 +415,30 @@ export function createDemoBackend(opts: {
           }),
         );
         return "ok";
+      });
+    },
+
+    async adoptForeignToken(token) {
+      if (!isWellFormedToken(token)) return false;
+      const token_hash = await hashToken(token);
+      return transact((s) => {
+        if (s.qr.some((q) => q.token_hash === token_hash)) return false;
+        const admin = s.admins[0];
+        s.seq += 1;
+        const q: QrRecord = {
+          id: uuid(),
+          serial_no: s.seq,
+          token_hash,
+          status: "unused",
+          created_at: new Date().toISOString(),
+          created_by: admin.id,
+          used_at: null,
+          revoked_at: null,
+          revoked_by: null,
+        };
+        s.qr.push(q);
+        s.audit.push(audit("admin", admin.id, "qr.issue", "qr_code", q.id, { serial_no: q.serial_no, demo_imported: true }));
+        return true;
       });
     },
 

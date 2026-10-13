@@ -1,15 +1,15 @@
 import { createClient } from "@supabase/supabase-js";
 import { SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL } from "@/lib/config";
-import { createDemoBackend } from "./demo";
+import { createDemoBackend, type DemoExtras } from "./demo";
 import { createSupabaseBackend } from "./supabase";
 import type { Backend } from "./types";
 
 export * from "./types";
 
-let instance: (Backend & { reset?: () => void }) | undefined;
+let instance: (Backend & Partial<DemoExtras>) | undefined;
 
 /** ブラウザ内で共有する Backend（ビルド設定で Supabase / デモを切り替え） */
-export function getBackend(): Backend & { reset?: () => void } {
+export function getBackend(): Backend & Partial<DemoExtras> {
   if (instance) return instance;
   // 環境変数を直接比較してビルド時に定数化し、本番ビルドからデモ用コードを除去させる
   if (process.env.NEXT_PUBLIC_DEMO_MODE === "1") {

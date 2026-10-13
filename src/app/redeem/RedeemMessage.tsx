@@ -1,5 +1,14 @@
 // 顧客向けのエラー・完了メッセージ。個人情報や内部情報（エラー詳細・ID等）は表示しない。
-export type RedeemMessageKind = "done" | "invalid" | "used" | "revoked" | "rate_limited" | "network" | "server_error";
+export type RedeemMessageKind =
+  | "done"
+  | "invalid"
+  | "no_token"
+  | "demo_foreign"
+  | "used"
+  | "revoked"
+  | "rate_limited"
+  | "network"
+  | "server_error";
 
 const MESSAGES: Record<RedeemMessageKind, { title: string; body: string; tone: "ok" | "ng" }> = {
   done: {
@@ -10,6 +19,16 @@ const MESSAGES: Record<RedeemMessageKind, { title: string; body: string; tone: "
   invalid: {
     title: "QRコードを確認できません",
     body: "このQRコードは無効です。お手元のQRコードをもう一度読み取ってください。解決しない場合はお問い合わせください。",
+    tone: "ng",
+  },
+  no_token: {
+    title: "QRコードの内容を読み取れませんでした",
+    body: "URLの一部が欠けている可能性があります。スマートフォン標準のカメラアプリで、QRコードをもう一度読み取ってください。解決しない場合はお問い合わせください。",
+    tone: "ng",
+  },
+  demo_foreign: {
+    title: "別の端末で発行されたデモ用QRコードです",
+    body: "デモモードのデータは、QRコードを発行した端末のブラウザ内にだけ保存されます。そのため、この端末からは発行元のデータを参照できません。下のボタンから、この端末で顧客側の操作（住所入力〜登録）を体験できます。登録内容は発行元の管理画面には反映されません。",
     tone: "ng",
   },
   used: {

@@ -1,0 +1,27 @@
+# プッシュ・プルリクエストごとにテスト（ユニット＋実 PostgreSQL の DB テスト）・型チェック・Lint・ビルドを実行
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      # embedded-postgres が実 PostgreSQL を起動して DB 関数・RLS・同時実行を検証する（Docker 不要）
+      - run: npm test
+      - name: デモのビルド確認
+        run: npm run build:demo

@@ -1,0 +1,26 @@
+# Supabase CLI 用のローカル設定（抜粋）。本番プロジェクトでも同じ値をダッシュボードで設定すること。
+project_id = "qr-delivery"
+
+[api]
+# API で公開するスキーマ。private スキーマは公開しない。
+schemas = ["public"]
+
+[db]
+major_version = 17
+
+[auth]
+site_url = "http://localhost:3000"
+# 一般ユーザーによるアカウント作成を禁止（管理者は運用手順に従って招待・作成する）
+enable_signup = false
+# JWT の有効期限（秒）
+jwt_expiry = 3600
+
+[auth.email]
+enable_signup = false
+enable_confirmations = true
+
+[auth.sms]
+enable_signup = false
+
+[auth.rate_limit]
+sign_in_sign_ups = 30

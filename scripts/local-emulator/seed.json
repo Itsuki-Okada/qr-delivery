@@ -1,0 +1,14 @@
+{
+  "_comment": "ローカル検証用エミュレーター専用のテスト管理者。本番の Supabase では使用しないこと。",
+  "admins": [
+    { "email": "admin@example.test", "password": "local-test-password-1", "display_name": "検証用管理者" },
+    { "email": "staff@example.test", "password": "local-test-password-2", "display_name": "検証用スタッフ" }
+  ],
+  "non_admins": [
+    { "email": "user@example.test", "password": "local-test-password-3" }
+  ],
+  "keys": {
+    "publishable": "local-publishable-key",
+    "secret": "local-secret-key-for-emulator-only"
+  }
+}

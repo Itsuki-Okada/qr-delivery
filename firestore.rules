@@ -1,0 +1,265 @@
+rules_version = '2';
+
+// QRコード配送管理システム: Firestore セキュリティルール
+//
+// サーバー側のプログラム（Cloud Functions）を使わないため、業務ルールはすべてここで強制する。
+// ブラウザで動く画面のコードは改ざんされ得る前提で、ここを通らない書き込みは一切できない。
+//
+// コレクション
+//   admins/{uid}        管理者の許可リスト（Firebase コンソールでのみ編集）
+//   counters/qr         識別番号の採番
+//   qr_tokens/{hash}    SHA-256(トークン) → QR の ID。トークンを知る人だけが QR を特定できる
+//   qr_codes/{qrId}     QR の状態（使用状態と発送状態を別項目で管理）。個人情報は持たない
+//   addresses/{qrId}    配送先住所（QR 1件につき最大1件：ドキュメント ID = QR の ID）
+//   audit_logs/{id}     操作履歴（追記のみ。住所・電話番号・トークンは保存しない）
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------
+    // 共通
+    // ------------------------------------------------------------------
+    function path(p) {
+      return /databases/$(database)/documents/$(p);
+    }
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // 2段階認証（TOTP 等）を完了したログインか
+    function secondFactorDone() {
+      return signedIn()
+        && ('firebase' in request.auth.token)
+        && ('sign_in_second_factor' in request.auth.token.firebase)
+        && request.auth.token.firebase.sign_in_second_factor != null;
+    }
+
+    // 有効な管理者で、かつ 2段階認証済み
+    function isAdmin() {
+      return secondFactorDone()
+        && exists(path('admins/' + request.auth.uid))
+        && get(path('admins/' + request.auth.uid)).data.is_active == true;
+    }
+
+    function unchanged(keys) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys);
+    }
+
+    function onlyChanged(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // ------------------------------------------------------------------
+    // 入力値の検証
+    // ------------------------------------------------------------------
+    // 制御文字・ゼロ幅文字・双方向制御文字（(?s) で改行もまたいで検査）
+    function noForbiddenChars(v) {
+      return !v.matches('(?s).*[\\x{00}-\\x{1F}\\x{7F}\\x{200B}-\\x{200F}\\x{202A}-\\x{202E}\\x{2060}-\\x{2064}\\x{FEFF}].*');
+    }
+
+    function isText(v, min, max) {
+      return v is string && v.size() >= min && v.size() <= max && v == v.trim() && noForbiddenChars(v);
+    }
+
+    function isPrefecture(v) {
+      return v in [
+        '北海道','青森県','岩手県','宮城県','秋田県','山形県','福島県',
+        '茨城県','栃木県','群馬県','埼玉県','千葉県','東京都','神奈川県',
+        '新潟県','富山県','石川県','福井県','山梨県','長野県','岐阜県',
+        '静岡県','愛知県','三重県','滋賀県','京都府','大阪府','兵庫県',
+        '奈良県','和歌山県','鳥取県','島根県','岡山県','広島県','山口県',
+        '徳島県','香川県','愛媛県','高知県','福岡県','佐賀県','長崎県',
+        '熊本県','大分県','宮崎県','鹿児島県','沖縄県'];
+    }
+
+    function validAddressFields(d) {
+      return d.keys().hasOnly(['recipient_name', 'postal_code', 'prefecture', 'city', 'address_line',
+                               'building', 'phone', 'created_at', 'updated_at', 'updated_by'])
+        && isText(d.recipient_name, 1, 100)
+        && d.postal_code is string && d.postal_code.matches('[0-9]{3}-[0-9]{4}')
+        && isPrefecture(d.prefecture)
+        && isText(d.city, 1, 100)
+        && isText(d.address_line, 1, 200)
+        && (d.building == null || isText(d.building, 1, 200))
+        && d.phone is string && d.phone.matches('0[0-9]{9,10}');
+    }
+
+    // ------------------------------------------------------------------
+    // 管理者の許可リスト（クライアントからは書き込み不可）
+    // ------------------------------------------------------------------
+    match /admins/{uid} {
+      // ログイン直後（2段階認証前）に自分が管理者かどうかだけは確認できる
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list: if isAdmin();
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // 識別番号の採番
+    // ------------------------------------------------------------------
+    match /counters/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && id == 'qr'
+        && request.resource.data.keys().hasOnly(['next_serial'])
+        && request.resource.data.next_serial == 2;
+      allow update: if isAdmin() && id == 'qr'
+        && request.resource.data.keys().hasOnly(['next_serial'])
+        && request.resource.data.next_serial == resource.data.next_serial + 1;
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // トークン（のハッシュ）→ QR の対応
+    // ------------------------------------------------------------------
+    match /qr_tokens/{hash} {
+      // ハッシュを知っている（＝トークンを持っている）場合のみ取得できる。一覧は誰にも許可しない
+      allow get: if hash.matches('[0-9a-f]{64}');
+      allow list: if false;
+      // 発行時に、新しく作られる未使用の QR と同時にだけ作成できる
+      allow create: if isAdmin()
+        && hash.matches('[0-9a-f]{64}')
+        && request.resource.data.keys().hasOnly(['qr_id'])
+        && request.resource.data.qr_id is string
+        && !exists(path('qr_codes/' + request.resource.data.qr_id))
+        && getAfter(path('qr_codes/' + request.resource.data.qr_id)).data.status == 'unused';
+      allow update, delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // QR コード
+    // ------------------------------------------------------------------
+    match /qr_codes/{qrId} {
+      // 顧客画面が状態（未使用/使用済み/無効）を確認するため、ID を知っていれば取得可。
+      // ID は推測不能なランダム値で、トークンからしか辿れない。個人情報は含まない。
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create: if isAdmin() && validNewQr();
+      allow update: if (isAdmin() && (revoke() || markShipped())) || redeem(qrId);
+      allow delete: if false;
+
+      function validNewQr() {
+        let d = request.resource.data;
+        let counter = path('counters/qr');
+        let expectedSerial = exists(counter) ? get(counter).data.next_serial : 1;
+        return d.keys().hasOnly(['serial_no', 'status', 'created_at', 'created_by', 'used_at', 'revoked_at',
+                                 'revoked_by', 'address_registered_at', 'shipment_status', 'shipped_at',
+                                 'shipped_by', 'redeemed_via'])
+          && d.serial_no == expectedSerial
+          && getAfter(counter).data.next_serial == expectedSerial + 1
+          && d.status == 'unused'
+          && d.created_at == request.time
+          && d.created_by == request.auth.uid
+          && d.used_at == null && d.revoked_at == null && d.revoked_by == null
+          && d.address_registered_at == null && d.shipment_status == null
+          && d.shipped_at == null && d.shipped_by == null && d.redeemed_via == null;
+      }
+
+      // 未使用 → 無効化（管理者）。使用済み・無効化済みは対象外で、元に戻す操作は存在しない
+      function revoke() {
+        let d = request.resource.data;
+        return resource.data.status == 'unused'
+          && d.status == 'revoked'
+          && d.revoked_at == request.time
+          && d.revoked_by == request.auth.uid
+          && onlyChanged(['status', 'revoked_at', 'revoked_by']);
+      }
+
+      // 発送待ち → 発送済み（管理者）。QR の使用状態は変えない。二重登録は不可
+      function markShipped() {
+        let d = request.resource.data;
+        return resource.data.shipment_status == 'pending'
+          && d.shipment_status == 'shipped'
+          && d.shipped_at == request.time
+          && d.shipped_by == request.auth.uid
+          && onlyChanged(['shipment_status', 'shipped_at', 'shipped_by']);
+      }
+
+      // 顧客の住所登録（ログイン不要）。
+      // 正しいトークンのハッシュを示し、同じ一括書き込みの中で住所を新規作成した場合だけ unused → used にできる。
+      function redeem(id) {
+        let d = request.resource.data;
+        return resource.data.status == 'unused'
+          && d.status == 'used'
+          && d.used_at == request.time
+          && d.address_registered_at == request.time
+          && d.shipment_status == 'pending'
+          && d.redeemed_via is string
+          && get(path('qr_tokens/' + d.redeemed_via)).data.qr_id == id
+          && !exists(path('addresses/' + id))
+          && existsAfter(path('addresses/' + id))
+          && onlyChanged(['status', 'used_at', 'address_registered_at', 'shipment_status', 'redeemed_via']);
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 配送先住所
+    // ------------------------------------------------------------------
+    match /addresses/{qrId} {
+      allow read: if isAdmin();
+
+      // 顧客の住所登録: QR を unused → used にする同じ一括書き込みの中でのみ作成できる。
+      // ドキュメント ID が QR の ID なので、QR 1件につき住所は最大1件（既存なら update 扱いで拒否）。
+      allow create: if validAddressFields(request.resource.data)
+        && request.resource.data.created_at == request.time
+        && request.resource.data.updated_at == request.time
+        && request.resource.data.updated_by == null
+        && get(path('qr_codes/' + qrId)).data.status == 'unused'
+        && getAfter(path('qr_codes/' + qrId)).data.status == 'used'
+        && get(path('qr_tokens/' + getAfter(path('qr_codes/' + qrId)).data.redeemed_via)).data.qr_id == qrId;
+
+      // 管理者による修正（修正者・修正日時を必ず記録）
+      allow update: if isAdmin()
+        && validAddressFields(request.resource.data)
+        && request.resource.data.updated_at == request.time
+        && request.resource.data.updated_by == request.auth.uid
+        && unchanged(['created_at']);
+
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // 操作履歴（追記のみ）
+    // ------------------------------------------------------------------
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if validLog(request.resource.data);
+      allow update, delete: if false;
+
+      function validMetadata(m) {
+        return m is map
+          && m.keys().hasOnly(['serial_no', 'changed_fields'])
+          && (!('serial_no' in m) || m.serial_no is int)
+          && (!('changed_fields' in m) || (m.changed_fields is list && m.changed_fields.size() <= 7
+              && m.changed_fields.hasOnly(['recipient_name', 'postal_code', 'prefecture', 'city',
+                                           'address_line', 'building', 'phone'])));
+      }
+
+      function validLog(d) {
+        return d.keys().hasOnly(['actor_type', 'actor_id', 'action', 'entity_type', 'entity_id',
+                                 'qr_code_id', 'created_at', 'metadata'])
+          && d.created_at == request.time
+          && d.qr_code_id is string
+          && d.entity_id is string
+          && validMetadata(d.metadata)
+          && (
+            // 顧客の住所登録: 実際に unused → used になる一括書き込みの中でのみ
+            (d.actor_type == 'customer' && d.actor_id == null
+              && d.action == 'address.register' && d.entity_type == 'qr_code' && d.entity_id == d.qr_code_id
+              && get(path('qr_codes/' + d.qr_code_id)).data.status == 'unused'
+              && getAfter(path('qr_codes/' + d.qr_code_id)).data.status == 'used')
+            ||
+            // 管理者の操作: 操作者は本人
+            (d.actor_type == 'admin' && isAdmin() && d.actor_id == request.auth.uid
+              && d.action in ['qr.issue', 'qr.revoke', 'address.update', 'shipment.mark_shipped']
+              && d.entity_type in ['qr_code', 'shipping_address', 'shipment'])
+          );
+      }
+    }
+
+    // それ以外のパスはすべて拒否
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
